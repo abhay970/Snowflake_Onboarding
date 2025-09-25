@@ -1,0 +1,566 @@
+Part B — Runbook / Playbook entries
+Below I produce one runbook/playbook entry per CSV backlog row above in the exact, plain‑text format you requested. Each entry begins with:
+Story <IssueId> — <Summary>
+and includes the exact sub-sections and wording you specified:
+Sub-task: <title>
+Goal: <one-sentence goal>.
+Developer checklist:
+...
+Acceptance checks:
+...
+Example developer notes:
+...
+Unit test checklist:
+...
+Deployment command(s):
+...
+I preserve the wording and provide file paths, example method signatures, SQL, and commands so a fresher can execute each sub‑task. Citations to the repo/design artifacts used are placed at the ends of sentences where relevant. Because there are many runbook entries, I include them sequentially in the order of the CSV. Each entry below corresponds to the CSV rows above and maps to the files/paths in the Manifest Path column.
+Story EPIC-SF-DG-MVP — Snowflake backend for standalone Document‑Generation MVP
+Sub-task: EPIC-SF-DG-MVP
+Goal: Coordinate and own Snowflake deliverables for Document‑Generation MVP.
+Developer checklist:
+Aggregate and verify all DDL, Snowpark procs, registration scripts, external function SQL, FAISS builder and CI workflow from the repo manifest paths in this backlog. 
+
+Confirm SNOW_* environment secrets and storage integration details with infra/security. 
+
+Define the sprints and assign tickets (all tickets assigned to onboarding@techkasetti.com). Acceptance checks:
+All child stories/subtasks in this Epic are in "Planned" or "Done" and their smoke tests pass in staging. 
+
+ Example developer notes:
+The canonical billing preview shape is line_items + invoice_hash (json variant) — tests use canonical JSON dumps + sha256 to compute expected invoice_hash. 
+
+ Unit test checklist:
+Ensure deterministic billing test passes locally and in CI. 
+
+ Deployment command(s):
+Use the ordered deploy script (deploy/deploy_snowflake_procs.sh) after provisioning infra and secrets are set. 
+
+*
+Story ST-SF-001 — Create core Snowflake DDL for Document Generation (tables + comments)
+Sub-task: Create DDL: DOCUMENT_ARCHIVE & EVIDENCE_BUNDLE
+Goal: Implement archive and evidence bundle tables used by e-sign and document assembly.
+Developer checklist:
+File paths: "sql/coreschema.sql" and "sql/evidence/evidencebundle.sql". 
+
+Create table DDL with columns:
+DOCUMENTID VARCHAR
+TEMPLATEID VARCHAR
+ASSEMBLYRUNID VARCHAR
+URL VARCHAR
+HASH VARCHAR
+CREATEDAT TIMESTAMPLTZ
+CREATEDBY VARCHAR
+JURISDICTION VARCHAR
+RETENTIONTAG VARCHAR
+Add COMMENTs for lineage and recommended clustering keys (e.g., CLUSTER BY (TEMPLATEID)). 
+
+Run snowsql in staging as: snowsql -a SNOWACCOUNT−u SNOW A​CCOUNT−uSNOW_USER -r SNOWROLE−w SNOW R
+​
+ OLE−wSNOW_WAREHOUSE -d AI_PLATFORM -s AI_FEATURE_HUB -f sql/coreschema.sql Acceptance checks:
+Snowsql returns success and a sample INSERT/SELECT roundtrip returns the same values. Example developer notes:
+Include retention tagging for automated purge logic; the purge stored-proc will reference RETENTIONTAG. 
+
+ Unit test checklist:
+run snowsql test script tests/snowsql/verify_coreschema.sql to assert table column count and types. Deployment command(s):
+snowsql -a SNOWACCOUNT−u SNOW A​CCOUNT−u SNOW_USER -r SNOWROLE−wSNOW R
+​
+ OLE−wSNOW_WAREHOUSE -d AI_PLATFORM -s AI_FEATURE_HUB -f sql/coreschema.sql_
+Sub-task: Create DDL: EMBEDDINGS & VECTOR store
+Goal: Implement DOCUMENT_EMBEDDINGS and optional VECTORSTORE for semantic search.
+Developer checklist:_
+File paths: "sql/vectorstore/schema.sql" and "sql/core/ai_feature_hub_core_tables.sql". 
+
+Columns: DOCUMENT_ID, EMBEDDING (VARIANT/ARRAY), PROVENANCE (VARIANT), METADATA (VARIANT), CREATED_AT TIMESTAMPLTZ.
+Add comment describing expected embedding dimensionality and storage format. 
+
+ Acceptance checks:
+Sample insert of a small embedding (1‑D array) succeeds and SELECT returns embedding as JSON. Example developer notes:
+Use VARIANT for flexible metadata but consider using VARBINARY for compact binary vectors if planned. 
+
+ Unit test checklist:
+Run a sample INSERT using snowsql then a SELECT to assert fields exist and retrieval returns shape. Deployment command(s):
+snowsql -f sql/vectorstore/schema.sql -a SNOWACCOUNT−u SNOW A​CCOUNT−uSNOW_USER -r $SNOW_ROLE_
+
+Story ST-SF-002 — Staging + Snowpipe ingest
+Sub-task: Create FILE FORMAT & STAGE
+Goal: Create JSON file format and stage for embedding files to be auto‑ingested via Snowpipe.
+Developer checklist:
+File path: "sql/snowpipe_setup.sql" or run infra/snowflake_provisioning.py with STORAGE_INTEGRATION and S3 bucket configured. 
+
+SQL signature sample:
+CREATE OR REPLACE FILE FORMAT AI_FEATURE_HUB.JSONL_FORMAT TYPE = 'JSON' STRIP_OUTER_ARRAY = FALSE;
+CREATE OR REPLACE STAGE AI_FEATURE_HUB.EMBEDDINGS_STAGE URL='s3://your-bucket/path/' FILE_FORMAT=AI_FEATURE_HUB.JSONL_FORMAT STORAGE_INTEGRATION='YOUR_INTEGRATION'; Acceptance checks:
+Stage lists successfully (SHOW STAGES) and PUT to stage works: snowsql PUT file://sample.json @AI_FEATURE_HUB.EMBEDDINGS_STAGE AUTO_COMPRESS=FALSE; Example developer notes:
+Ensure your S3 bucket has notifications to Snowflake (SNS/SQS) if you want AUTO_INGEST via PIPE. 
+
+ Unit test checklist:
+PUT a small sample JSONL to the stage and run COPY INTO to a staging table to assert rows land. Deployment command(s):
+snowsql -f sql/snowpipe_setup.sql -a SNOWACCOUNT−u SNOW A​CCOUNT−uSNOW_USER
+
+Sub-task: Create PIPE for auto-ingest
+Goal: Create PIPE with AUTO_INGEST=TRUE that copies uploaded files into staging tables.
+Developer checklist:_
+SQL sample (in sql/snowpipe_setup.sql):
+CREATE OR REPLACE PIPE AI_FEATURE_HUB.PIPE_EMBEDDINGS AUTO_INGEST=TRUE AS COPY INTO AI_FEATURE_HUB.STAGED_EMBEDDINGS FROM ( SELECT $1:document_id::STRING, $1:embedding, ... FROM @AI_FEATURE_HUB.EMBEDDINGS_STAGE (FILE_FORMAT => 'AI_FEATURE_HUB.JSONL_FORMAT') );
+Confirm S3 -> Snowflake notification mapping on AWS side. 
+
+ Acceptance checks:
+After uploading file to S3, the PIPE loads data into STAGED_EMBEDDINGS within a minute (subject to notifications). Example developer notes:
+Manual COPY INTO test is recommended before enabling SNS notifications. Unit test checklist:
+Upload sample JSONL to stage and verify that STAGED_EMBEDDINGS contains expected rows within expected time window. Deployment command(s):
+snowsql -f sql/snowpipe_setup.sql_
+Story ST-SF-003 — Snowpark procedures (billing/ingest/entitlement)
+Sub-task: Register run_billing_run stored-proc
+Goal: Register run_billing_run stored-proc (preview + final) in ADMIN or AI_FEATURE_HUB schema.
+Developer checklist:
+Files: "src/run_billing.py" and registration SQL "register/create_procedures_register.sql" (see manifest). 
+
+Example CREATE PROCEDURE signature:
+CREATE OR REPLACE PROCEDURE AI_FEATURE_HUB.RUN_BILLING_RUN(run_start STRING, run_end STRING, account_id STRING DEFAULT NULL, preview BOOLEAN DEFAULT TRUE) RETURNS VARIANT LANGUAGE PYTHON IMPORTS = ('@~/run_billing.py') HANDLER='run_billing_run' RUNTIME_VERSION='3.8' PACKAGES=('snowflake-snowpark-python');
+PUT run_billing.py to @~ via snowsql or register_via_connector.py. 
+
+Test CALL:
+CALL AI_FEATURE_HUB.RUN_BILLING_RUN('2025-08-01','2025-08-31','det-acct-001', TRUE); Acceptance checks:
+Procedure returns a VARIANT containing "preview": true, "line_items": [ ... ], and "invoice_hash": "<hex>" in preview mode. 
+
+ Example developer notes:
+Confirm PACKAGES import and runtime_version match your Snowpark env. 
+
+ Unit test checklist:
+Run deterministic pytest to seed fixture + CALL proc + compare invoice_hash. 
+
+ Deployment command(s):
+register/register_all_procs.sh or python infra/register_via_connector.py (if snowsql not present) with SNOW_* env vars set. 
+
+*
+Sub-task: Register ingestion SPs (embedding_ingest_sp & ingest_usage_sp)
+Goal: Register idempotent ingestion stored procedures and verify MERGE semantics.
+Developer checklist:
+Files: "src/embedding_ingest_sp.py" and "src/ingest_usage_sp.py". 
+
+CREATE PROCEDURE examples similar to RUN_BILLING_RUN but handler set to respective functions.
+Example MERGE seed test SQL in tests/sql/ingest_mergetest.sql. Acceptance checks:
+Duplicate idempotency_key ingestion results in no duplicate persisted rows (idempotency enforced). 
+
+ Example developer notes:
+Ensure ingested JSON shape matches stored-proc expectations (record_id, account_id, feature_key, usage_qty, idempotency_key). 
+
+ Unit test checklist:
+Run MERGE test that inserts same file twice and assert single row persisted. Deployment command(s):
+register/register_all_procs.sh or infra/register_via_connector.py_
+Story ST-SF-004 — Procedure registration (CI & fallback)
+Sub-task: Implement register_all_procs.sh (snowsql)
+Goal: Provide a snowsql-based registration script for CI that PUTs and registers all Python procs.
+Developer checklist:
+File: "register/register_all_procs.sh" (manifest path). 
+
+Steps in script:
+snowsql PUT file://src/run_billing.py @~ AUTO_COMPRESS=FALSE;
+snowsql -f register/create_procedures_register.sql
+Add logging & exit codes and upload logs to CI artifacts. 
+
+ Acceptance checks:
+Script returns 0, and each procedure appears in SHOW PROCEDURES for the schema. Example developer notes:
+If CI runner lacks snowsql, use connector fallback infra/register_via_connector.py. 
+
+ Unit test checklist:
+Run script in staging and call each proc to ensure registration worked. Deployment command(s):
+chmod +x register/register_all_procs.sh; ./register/register_all_procs.sh
+Story ST-SF-005 — External Functions & API_INTEGRATION
+Sub-task: Create API_INTEGRATION record
+Goal: Create API_INTEGRATION AI_FEATURE_HUB.ai_feature_integration to enable External Functions calls to your gateway.
+Developer checklist:_
+File: "sql/external_functions_register.sql" or run infra/snowflake_provisioning.py. 
+
+Update placeholders:
+<YOUR_API_AWS_ROLE_ARN>
+<YOUR_API_GATEWAY_URL>
+API_ALLOWED_PREFIXES
+SQL example:
+CREATE OR REPLACE API INTEGRATION AI_FEATURE_HUB.ai_feature_integration API_PROVIDER = aws_api_gateway API_AWS_ROLE_ARN = '<YOUR_API_AWS_ROLE_ARN>' ENABLED=TRUE API_ALLOWED_PREFIXES=('https://<YOUR_API_GATEWAY_URL>/'); Acceptance checks:
+SHOW INTEGRATIONS returns the created integration and allowed prefixes. 
+
+ Example developer notes:
+For GCP/Azure change API_PROVIDER accordingly. 
+
+ Unit test checklist:
+Call a test External Function in SQL (SELECT AI_FEATURE_HUB.SIMILARITY_QUERY(PARSE_JSON('{"q":"foo"}'),5);) and confirm gateway returns a 200 JSON response when container & gateway are up. 
+
+ Deployment command(s):
+snowsql -f sql/external_functions_register.sql (after replacing placeholders) or run infra/snowflake_provisioning.py_
+Story ST-SF-006 — FAISS index builder & container (PoC for MVP)
+Sub-task: Build FAISS index & upload to S3
+Goal: Produce a FAISS index snapshot from Snowflake vectors and upload to S3 for container use.
+Developer checklist:
+File: "faiss/production_faiss_builder_v2.py" (manifest). 
+
+Example run:
+python faiss/production_faiss_builder_v2.py --snow_account SNOWACCOUNT−−snowuserSNOW A​CCOUNT−−snow u​serSNOW_USER --snow_password SNOWPASSWORD−−warehouseSNOW P​ ASSWORD−−warehouseSNOW_WAREHOUSE --query "SELECT DOCUMENT_ID, EMBEDDING FROM AI_FEATURE_HUB.DOCUMENT_EMBEDDINGS WHERE SOME_FILTER" --index_out /tmp/index.faiss --s3_bucket my-bucket --s3_key indexes/index.faiss
+
+Verify uploaded index in S3 and save faiss_manifest.json. Acceptance checks:
+S3 path contains index file and manifest; a local test of faiss similarity against index returns expected nearest neighbors for test vectors. 
+
+ Example developer notes:
+Use IndexFlatL2 for small corpora; for production use IVF/OPQ + sharding. 
+
+ Unit test checklist:
+Run a small local query against built index; assert returned doc IDs match expected sample. Deployment command(s):
+python faiss/production_faiss_builder_v2.py <args>
+Story ST-SF-007 — Masking, Row Policies & Grants
+Sub-task: Create & attach MASKING policy
+Goal: Implement masking policy for provenance fields and attach to columns.
+Developer checklist:
+File: "sql/attach_policies_and_grants.sql" and infra/snowflake_provisioning.py. 
+
+Edit ROLE names to match your org (ADMIN_ROLE, COMPLIANCE_ROLE, TENANT_READ_ROLE). 
+
+SQL sample:
+CREATE OR REPLACE MASKING POLICY AI_FEATURE_HUB.mask_provenance_policy AS (val VARIANT) RETURNS VARIANT -> CASE WHEN CURRENT_ROLE() IN ('ADMIN_ROLE','COMPLIANCE_ROLE') THEN val ELSE NULL END;
+ALTER TABLE AI_FEATURE_HUB.DOCUMENT_EMBEDDINGS MODIFY COLUMN provenance_id SET MASKING POLICY AI_FEATURE_HUB.mask_provenance_policy; Acceptance checks:
+Query as non-privileged role returns NULL masked provenance, while admin role sees real value. 
+
+ Example developer notes:
+Test with runAs simulation if using Apex, or with separate SNOW_USER/ROLE accounts. 
+
+ Unit test checklist:
+Create test role, run SELECT as test role and confirm masked output. Deployment command(s):
+snowsql -f sql/attach_policies_and_grants.sql_
+Story ST-SF-008 — Deterministic billing tests & smoke harness
+Sub-task: Implement deterministic pytest test
+Goal: Provide tests/test_deterministic_billing.py to seed fixtures and assert invoice_hash and line_items exactly match expected. 
+
+
+Developer checklist:
+File: "tests/test_deterministic_billing.py" (manifest). 
+
+Environment: SNOW_* secrets must be set in CI (GitHub Secrets). 
+
+Test steps:
+Connect using snowflake-connector-python
+Seed TENANT_FEATURE_USAGE and ACCOUNT_FEATURE_PRICING with deterministic values
+CALL AI_FEATURE_HUB.RUN_BILLING_RUN(..., preview=>TRUE)
+Canonicalize line_items and compute sha256(json.dumps(..., separators=(',',':'), sort_keys=True))
+Assert server invoice_hash equals computed hash Acceptance checks:
+pytest returns PASS in CI for deterministic test; test fails with mismatched hashes. Example developer notes:
+Keep numeric rounding consistent (use Decimal quantize) to avoid minor float differences. 
+
+ Unit test checklist:
+Run pytest locally with SNOW_* env vars; confirm test passes before CI commit. Deployment command(s):
+pytest -q tests/test_deterministic_billing.py_
+Sub-task: Smoke harness (full_acceptance_smoke.sh)
+Goal: Provide a shell script to run a full end‑to‑end smoke path: seed → ingestion → entitlement → billing preview → verify archival. 
+
+
+Developer checklist:
+File: "tests/smoke/full_acceptance_smoke.sh" (manifest). 
+
+Steps:
+snowsql -f tests/snowsql/seed_sample_usage.sql
+CALL AI_FEATURE_HUB.EMBEDDING_INGEST_SP(...) or ensure PIPE processed
+CALL AI_FEATURE_HUB.RUN_BILLING_RUN(..., preview=>TRUE)
+snowsql -f tests/snowsql/verify_archive.sql Acceptance checks:
+Smoke script exits 0 and prints PASS; logs uploaded as CI artifacts. 
+
+ Example developer notes:
+Use small sample data and cleanup at script end to avoid polluting staging. 
+
+ Unit test checklist:
+Run script manually once in staging and assert outputs. Deployment command(s):
+chmod +x tests/smoke/full_acceptance_smoke.sh; ./tests/smoke/full_acceptance_smoke.sh_
+Story ST-SF-009 — CI Workflow
+Sub-task: Implement GitHub Actions CI workflow
+Goal: Add .github/workflows/ci.yml which deploys DDL, registers procs, runs smoke harness and deterministic tests. 
+
+Developer checklist:
+File: ".github/workflows/ci.yml" (manifest). 
+
+Add repository secrets: SNOW_ACCOUNT, SNOW_USER, SNOW_PASSWORD, SNOW_ROLE, SNOW_WAREHOUSE. 
+
+Ensure runner has snowsql or use infra/register_via_connector.py; adapt job to self-hosted runner as needed. 
+
+ Acceptance checks:
+CI pipeline completes with green artifacts and logs uploaded; failures fail PR checks. Example developer notes:
+For hosted runners lacking snowsql, use the connector fallback in a separate job. 
+
+ Unit test checklist:
+Push a test branch to trigger CI and observe log artifacts. 
+
+ Deployment command(s):
+Push to repo (main) to trigger workflow or manually dispatch via GitHub UI._
+Story ST-SF-010 — Deploy & smoke runbook & ordered deploy script
+Sub-task: Create deploy script to PUT & CREATE procedure/DDL in safe order
+Goal: Provide a single deploy script that stages files then runs CREATE TABLE and CREATE PROCEDURE in safe order and executes smoke tests. 
+
+
+Developer checklist:
+File: "deploy/deploy_snowflake_procs.sh" (manifest) or use register/register_all_procs.sh + sql/coreschema.sql execution.
+Order:
+Deploy core DDL (sql/coreschema.sql) via snowsql
+PUT Python files to @~ (or use register_via_connector.py)
+CREATE PROCEDURE via register/create_procedures_register.sql
+Create API_INTEGRATION + EXTERNAL FUNCTION (sql/external_functions_register.sql)
+Create PIPE/STAGE (sql/snowpipe_setup.sql) if not already created
+Run smoke harness (tests/smoke/full_acceptance_smoke.sh) Acceptance checks:
+Script exits 0; snowsql verification queries show expected tables/procs and test queries succeed. 
+
+ Example developer notes:
+Always run DDL first, then register procs referencing files in @~. 
+
+ Unit test checklist:
+Execute script in a disposable staging account; verify tables and procedures present. Deployment command(s):
+chmod +x deploy/deploy_snowflake_procs.sh; ./deploy/deploy_snowflake_procs.sh
+--- End of runbook entries for each backlog row above.
+Part C — Deployment checklist with exact snowsql commands (ordered, dependency-safe)
+Execute in this order from a machine with snowsql or adapt to register_via_connector.py:
+Create/verify DATABASE & SCHEMA (run as SYSADMIN/ACCOUNTADMIN)
+snowsql -a SNOWACCOUNT−u SNOW A​CCOUNT−uSNOW_USER -r SNOWROLE−wSNOW ROLE−wSNOW_WAREHOUSE -q "CREATE DATABASE IF NOT EXISTS AI_PLATFORM;"
+snowsql -a SNOWACCOUNT−u SNOW A​CCOUNT−uSNOW_USER -r SNOWROLE−wSNOW R​OLE−wSNOW_WAREHOUSE -q "CREATE SCHEMA IF NOT EXISTS AI_PLATFORM.AI_FEATURE_HUB;"
+Deploy core DDL (tables)
+snowsql -a SNOWACCOUNT−uSNOW A​CCOUNT−uSNOW_USER -r SNOWROLE−wSNOW R​OLE−wSNOW_WAREHOUSE -d AI_PLATFORM -s AI_FEATURE_HUB -f sql/coreschema.sql 
+
+_
+Create FILE FORMAT and STAGE (or run provisioning script)
+snowsql -a SNOWACCOUNT−uSNOW A​CCOUNT−uSNOW_USER -r SNOWROLE−wSNOW R​OLE−wSNOW_WAREHOUSE -d AI_PLATFORM -s AI_FEATURE_HUB -f sql/snowpipe_setup.sql 
+
+OR: python infra/snowflake_provisioning.py (with env vars set) 
+
+_
+PUT Python files to @~ (if using snowsql)
+snowsql -a SNOWACCOUNT−uSNOW A​CCOUNT−uSNOW_USER -r SNOWROLE−wSNOW R​OLE−wSNOW_WAREHOUSE -d AI_PLATFORM -s AI_FEATURE_HUB -q "PUT file://src/run_billing.py @~ AUTO_COMPRESS=FALSE;"
+Repeat for embedding_ingest_sp.py, ingest_usage_sp.py, entitlement_check.py, write_evidence_bundle.py 
+
+Register stored procedures (CREATE PROCEDURE)
+snowsql -a SNOWACCOUNT−uSNOW ACCOUNT−uSNOW_USER -r SNOWROLE−wSNOW R​OLE−wSNOW_WAREHOUSE -d AI_PLATFORM -s AI_FEATURE_HUB -f register/create_procedures_register.sql 
+
+_
+Create API_INTEGRATION and External Functions_
+snowsql -f sql/external_functions_register.sql after replacing placeholders for API_AWS_ROLE_ARN and API gateway host 
+
+_
+Resume or create TASKS and schedule run_billing_run (if desired)
+snowsql -q "ALTER TASK AI_FEATURE_HUB.TASK_REFRESH_FEATURE_USAGE_WINDOW RESUME;" or create task per your schedule 
+
+Create masking & row policies and GRANTs
+snowsql -f sql/attach_policies_and_grants.sql 
+
+_
+Run smoke harness and deterministic test (local/CI)
+./tests/smoke/full_acceptance_smoke.sh (ensure SNOW_* env set) 
+
+pytest -q tests/test_deterministic_billing.py with SNOW_* envs configured 
+
+If CI runner lacks snowsql, run:
+python infra/register_via_connector.py (ensures PUT and CREATE via connector) 
+
+Part D — Jira import notes and next steps
+Import the CSV into Jira using your CSV import tool mapping fields to Jira fields; Epics → Stories → Sub-tasks will be linked via the Parent column. - After import, attach the runbook text (the runbook entries above) into the Jira ticket description or as an attached text file so developers have the verbatim per‑ticket runbook. - Add repository links and secrets references to each ticket for developer ease.
+References (traceability)
+Snowpark stored-proc file list and billing preview pattern (returns line_items + invoice_hash) used to author deterministic test and registration flows 
+.
+External Function / API_INTEGRATION registration patterns and examples used for external_functions_register.sql and programmatic provisioning design 
+.
+Provisioning, PUT + CREATE PROCEDURE registration pattern and register_all_procs.sh and connector fallback are drawn from earlier registration/runbook artifacts in the repo 
+.
+FAISS builder, container skeleton and index snapshot flow were implemented based on FAISS/ANN recommendations in the Snowflake artifacts and the test harness pattern 
+******************************************************************************************************************************************************************
+
+
+Direct answer — I reviewed the Jira backlog CSV and the verbatim runbook/playbook you asked me to produce and validated coverage against all Snowflake artifacts and code we generated earlier. The backlog + runbooks do cover the full Snowflake implementation surface for the Document‑Generation MVP (DDL, ingestion, Snowpark procedures, External Functions, FAISS index flow, policy/grants, registration scripts, smoke &amp; deterministic tests, and CI), provided you complete the operational inputs I list below. I also call out remaining manual/ops steps and risks you must close before you can mark the work “100% done.”  
+Summary of coverage (each sentence cites the source artifacts that establish the item)
+
+Core DDL (DOCUMENT/TEMPLATE/CLAUSE/USAGE/BILLING/EVIDENCE tables) are included and mapped to SQL files in the backlog; those table names and the canonical schema pattern were produced in the Snowflake bundle and core DDL artifacts.  
+Snowpark stored procedures we relied on (run_billing_run with preview + invoice_hash, entitlement_check, embedding_ingest_sp, usage_ingest_sp and write_evidence_bundle) are present in the delivered repo skeleton and were explicitly referenced as the billing/ingest implementation patterns the tests expect.  
+External Function / API_INTEGRATION registration SQL (for FAISS/agent endpoints) and the programmatic provisioning pattern (API_INTEGRATION + EXTERNAL FUNCTION) are in the delivered artifacts and the backlog entries map to the sql/external_functions_register.sql and the provisioning helper.  
+FAISS/ANN index builder, index snapshot loader, and a container skeleton to serve similarity queries were supplied and are mapped in the backlog/manifest so the similarity service can be hosted and called from Snowflake External Functions.  
+Snowpipe / stage / file‑format / pipe for auto‑ingest and the recommended pattern (stage → pipe → task → Snowpark ingest) were included in the repo/runbook and included as explicit backlog tasks for provisioning and verification.  
+The registration and deployment options are covered: register_all_procs.sh for snowsql runners and register_via_connector.py fallback for runners without snowsql — both are present and placed into tasks in your backlog/CI job.  
+Deterministic billing unit test and smoke harness (pytest + shell smoke script) that assert invoice_hash and line_items are provided and are referenced in the backlog so CI can gate on exact deterministic results.  
+CI workflow (GitHub Actions) that sequences DDL → registration → smoke → deterministic tests was created and mapped to the manifest so you can block merges on these checks.
+
+What the backlog + playbook ensure for a developer (how it helps a fresher)
+
+Each Snowflake artifact is a discrete sub‑task in the CSV and has a verbatim runbook entry with: exact file path, the commands to run (snowsql or Python connector), example CREATE/PUT/CREATE PROCEDURE SQL signatures, and test steps — so a fresher can copy/paste and execute the steps end‑to‑end.  
+The runbook includes step‑by‑step developer checklists for each item: DDL → stage/pipe → register procs → API_INTEGRATION → attach policies → run smoke/deterministic tests → CI, matching the “safe order” registration pattern recommended in the Snowflake spec.  
+The deterministic test reproduces the canonical invoice_hash method (canonical JSON dump + sha256) so a fresher can validate that server and client compute the same hash during acceptance tests.
+===========================================================================================================================
+Open items / operational inputs that still MUST be provided before the backlog/runbook will let a developer complete and verify everything
+********************************************************************************************************************************
+
+
+Cloud integration values: STORAGE_INTEGRATION, S3 bucket URL(s), and S3 → Snowflake notification wiring (SNS/SQS or equivalent) are required to enable Snowpipe AUTO_INGEST; the repo provides the SQL/script but cannot create your cloud notification resources for you.  
+External gateway / container endpoints &amp; IAM: API_AWS_ROLE_ARN (or equivalent provider role), API gateway host/URL, and container registry credentials (ECR/GCR) are required to create API_INTEGRATION and to push/publish the FAISS container referenced by External Functions.  
+Role names and least‑privilege mapping: you must confirm the service and tenant roles (e.g., SERVICE_ROLE, TENANT_READ_ROLE, ADMIN_ROLE) and the intended grants so the attach_policies_and_grants.sql actions match your org’s IAM model.  
+Security &amp; compliance steps: PII masking rules, DLP, pentest remediation, and production hardening (HSM/PKI) are included as acceptance gating in the spec but are manual activities that require security/legal signoff; the runbooks create masking/row policies but you must finalize the policies and run the pen test &amp; remediation flow.  
+Scale tuning for FAISS/ANN: the provided FAISS builder uses IndexFlatL2 for an MVP PoC; for production at scale you should adopt IVF/OPQ/sharding and appropriate container sizing — the repo calls this out and supplies the container skeleton for extension.
+
+Concrete verification checklist (what to run in staging to validate the backlog/runbook is sufficient)
+
+Preflight: set and verify environment variables and secrets (SNOW_ACCOUNT, SNOW_USER, SNOW_PASSWORD, SNOW_ROLE, SNOW_WAREHOUSE, STORAGE_INTEGRATION, S3_BUCKET, API_AWS_ROLE_ARN, API_GATEWAY_HOST) — noted in provisioning runbook.  
+Provisioning: run infra/snowflake_provisioning.py (or execute sql/snowpipe_setup.sql + sql/external_functions_register.sql) to create stage/fileformat/pipe and API_INTEGRATION + EXTERNAL FUNCTIONs — verify SHOW STAGES / SHOW INTEGRATIONS returned expected rows.  
+DDL: run sql/coreschema.sql to create tables and ensure sample insert/select queries succeed (run tests/snowsql/verify_coreschema.sql).  
+Register procs: run register/register_all_procs.sh (or infra/register_via_connector.py) to PUT Python files and CREATE PROCEDURE entries; then CALL RUN_BILLING_RUN preview to validate shape and sample line items.  
+FAISS: run faiss/production_faiss_builder_v2.py to produce an index snapshot and upload to S3, build and run the FAISS container locally and hit /similarity to verify responses; then call the External Function from Snowflake to validate connectivity.  
+Policies &amp; grants: execute sql/attach_policies_and_grants.sql and test masked output as non‑privileged role vs admin role.  
+Deterministic test &amp; smoke: run pytest tests/test_deterministic_billing.py and ./tests/smoke/full_acceptance_smoke.sh; verify invoice_hash equality and artifacts in CI logs.  
+CI: push to the branch to trigger .github/workflows/ci.yml and review artifacts; fix any runner issues (snowsql availability) — the runbook provides a connector fallback for environments without snowsql.
+
+Risk summary and mitigation recommendations
+
+Risk: Missing cloud notification wiring will block auto‑ingest; Mitigation: run manual COPY INTO for testing and set up SNS/SQS notifications with infra team before enabling PIPE AUTO_INGEST.  
+Risk: Floating float/rounding differences can cause invoice_hash mismatches; Mitigation: use Decimal and canonical quantize in both test and Snowpark code and keep test fixtures deterministic (already implemented in test_deterministic_billing.py).  
+Risk: External Functions exposed to internet without mTLS or API key will be a security gap; Mitigation: secure API gateway with mTLS/API keys and restrict ingress to Snowflake IPs or use signed role approach referenced in the spec.  
+Risk: FAISS scaling incorrect for large corpora; Mitigation: adopt IVF/OPQ and container sharding per spec and run performance tests (the backlog includes a FAISS builder PoC and a separate performance epic).
+
+Conclusion — verification statement
+
+The Jira backlog CSV and the verbatim runbook/playbook you asked me to generate do comprehensively cover all Snowflake‑side implementation artifacts that were produced earlier (DDL, stages/pipes, Snowpark stored procs, External Functions/API_INTEGRATION, FAISS builder + container skeleton, registration scripts, policy attachments, deterministic + smoke tests, and CI), and the runbook entries include the exact commands, file paths and test checklists a fresher needs to implement and validate each item end‑to‑end.  
+To mark the project “100% Snowflake‑ready” you must supply the cloud/IAM values (STORAGE_INTEGRATION, S3 bucket, API role ARN, API gateway host, role names) and perform the security/configuration steps called out above; once those inputs are provided and the provisioning + registration + CI smoke/deterministic tests pass, the backlog/runbooks will enable a developer to complete the Snowflake Document‑Generation MVP without gaps.
+
+*****************************************************************************************************************************************************************************
+Direct answer — below is a concise, ordered “remediation / run‑to‑green” checklist you can give a developer to move a staging Snowflake environment to green CI, with exact commands, expected outputs, and short remediation notes for failures. Each numbered step is the minimum reproducible action; run them in order. Where I reference repo files or scripts I cite the source artifact so you can open and inspect the file before running the step.  
+Preflight — set secrets and verify access
+
+Export Snowflake and cloud secrets on the runner (or set GitHub Secrets). Example env vars: SNOW_ACCOUNT, SNOW_USER, SNOW_PASSWORD, SNOW_ROLE, SNOW_WAREHOUSE, SNOW_DATABASE=AI_PLATFORM, SNOW_SCHEMA=AI_FEATURE_HUB, STORAGE_INTEGRATION, S3_BUCKET, API_AWS_ROLE_ARN, API_GATEWAY_HOST. Confirm you can log in with snowsql: snowsql -a $SNOW_ACCOUNT -u $SNOW_USER -r $SNOW_ROLE -w $SNOW_WAREHOUSE -q &quot;SELECT current_version();&quot; — expected: Snowflake version row returned. (See provisioning helper and required env vars in infra/snowflake_provisioning.py)
+
+Provision stage / file format / pipe (Snowpipe)2) Run provisioning to create FILE FORMAT, STAGE and PIPE (AUTO_INGEST) either by executing the SQL or running the Python helper: python infra/snowflake_provisioning.py, with STORAGE_INTEGRATION and S3_BUCKET set, or run snowsql -f sql/snowpipe_setup.sql after editing placeholders. Expected success: CREATE statements succeed and SHOW STAGES lists AI_FEATURE_HUB.EMBEDDINGS_STAGE; the PIPE is visible via SHOW PIPES. (Script and SQL paths are in the repo)
+If failure: verify STORAGE_INTEGRATION exists and S3 permissions/notification (SNS/SQS) are configured on the cloud provider; manually run a COPY INTO to validate access before re‑enabling AUTO_INGEST.
+Deploy core DDL (tables)3) Deploy core schema DDL in safe order: snowsql -a $SNOW_ACCOUNT -u $SNOW_USER -r $SNOW_ROLE -w $SNOW_WAREHOUSE -d AI_PLATFORM -s AI_FEATURE_HUB -f sql/coreschema.sql. Expected: CREATE TABLE statements return OK and a sample INSERT + SELECT roundtrip succeeds. (Core DDL file location in manifest)
+If failure: inspect SQL error for missing privileges or syntax differences; ensure ACCOUNTROLE has USAGE/CREATE on DB/SCHEMA and rerun.
+PUT Python procs to stage (if using snowsql)4) Upload Python source files to user stage @~ so CREATE PROCEDURE can IMPORT them: example:snowsql -a $SNOW_ACCOUNT -u $SNOW_USER -r $SNOW_ROLE -w $SNOW_WAREHOUSE -d AI_PLATFORM -s AI_FEATURE_HUB -q &quot;PUT file://src/run_billing.py @/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;&quot;Repeat for embedding_ingest_sp.py, ingest_usage_sp.py, entitlement_check.py, write_evidence_bundle.py. Expected: PUT returns &quot;uploaded&quot; lines and file appears in LIST @ via snowsql &quot;ls @~&quot;. (Register patterns and file list are in the repo)
+If failure: check file paths, network access to Snowflake stage, and client execution permissions.
+Register stored procedures (CREATE PROCEDURE)5) Register procedures in safe order (DDL must exist first): snowsql -a $SNOW_ACCOUNT -u $SNOW_USER -r $SNOW_ROLE -w $SNOW_WAREHOUSE -d AI_PLATFORM -s AI_FEATURE_HUB -f register/create_procedures_register.sql — or use python infra/register_via_connector.py if the runner lacks snowsql. Expected: CREATE PROCEDURE statements succeed and SHOW PROCEDURES shows AI_FEATURE_HUB.RUN_BILLING_RUN and others. (Registration fallback and scripts provided)
+Verify by calling preview: CALL AI_FEATURE_HUB.RUN_BILLING_RUN(&#39;2025-08-01&#39;,&#39;2025-08-31&#39;,&#39;acct-001&#39;, TRUE); — expected: a VARIANT JSON result containing &quot;line_items&quot; array and &quot;invoice_hash&quot; string per stored‑proc spec. (Preview semantics described in run_billing proc)
+If failure: inspect procedure stderr logs in Snowflake (query TABLE(INFORMATION_SCHEMA.PROCEDURES) for errors), ensure imports (@~) point to currently staged files, and confirm PACKAGES runtime matches environment.
+Create API_INTEGRATION + External Functions6) Create API_INTEGRATION and External Functions (similarity, agent) by running sql/external_functions_register.sql after replacing API_AWS_ROLE_ARN and API_GATEWAY_HOST, or use infra/snowflake_provisioning.py which automates this. Expected: SHOW INTEGRATIONS returns your API integration and SHOW EXTERNAL FUNCTIONS (or DESCRIBE) lists SIMILARITY_QUERY and AGENT_RUN. (See external function registration helper)
+Validate by executing a simple call: SELECT AI_FEATURE_HUB.SIMILARITY_QUERY(PARSE_JSON(&#39;{&quot;q&quot;:&quot;test&quot;}&#39;), 5); — expected: either a network error (if container/gateway not up) or a VARIANT JSON with result structure; success confirms Snowflake → gateway path. (External function pattern in repo)
+If failure: confirm API_AWS_ROLE_ARN IAM trust and policy, confirm gateway URL is reachable and returns a JSON 200 for a test POST.
+Build FAISS index and push container (PoC)7) Build FAISS index from Snowflake and upload to S3: python faiss/production_faiss_builder_v2.py --snow_account $SNOW_ACCOUNT --snow_user $SNOW_USER --snow_password $SNOW_PASSWORD --warehouse $SNOW_WAREHOUSE --query &quot;SELECT DOCUMENT_ID, EMBEDDING FROM AI_FEATURE_HUB.DOCUMENT_EMBEDDINGS WHERE &quot; --index_out /tmp/index.faiss --s3_bucket my-bucket --s3_key indexes/index.faiss. Expected: /tmp/index.faiss exists and S3 has indexes/index.faiss and faiss_manifest.json. (FAISS builder and manifest are in repo)
+Then build and push container (example): docker build -t my-registry/ai-faiss:latest faiss/ &amp;&amp; docker push my-registry/ai-faiss:latest; register container behind API gateway per your infra. Expected: container image in registry and accessible via API gateway host used earlier. (Dockerfile in repo)
+If failure: for large corpora, switch to IVF/OPQ and shard index or run builder on a machine with sufficient memory; check S3 upload IAM permissions.
+Attach masking &amp; row‑access policies and GRANTs8) Apply masking and row policies: snowsql -a $SNOW_ACCOUNT -u $SNOW_USER -r $SNOW_ROLE -w $SNOW_WAREHOUSE -d AI_PLATFORM -s AI_FEATURE_HUB -f sql/attach_policies_and_grants.sql. Expected: CREATE MASKING POLICY and ALTER TABLE statements succeed and the masking policy is attached. (Attach policy SQL provided)
+Verify: run two sessions — one with admin role and one with a tenant role — and SELECT DOCUMENT_EMBEDDINGS.provenance_id to confirm masking behavior. If tenant role sees NULL and admin sees full value, policy is working.
+If failure: adjust roles in the SQL to match your org’s role names; ensure role privileges to ALTER TABLE exist.
+Run smoke harness and deterministic test locally (pre‑CI)9) Execute smoke shell script to run a staged end‑to‑end flow: chmod +x tests/smoke/full_acceptance_smoke.sh &amp;&amp; ./tests/smoke/full_acceptance_smoke.sh. Expected: script completes with exit code 0 and prints a PASS summary; artifacts (logs) are produced. (Smoke harness is in the repo)
+Then run deterministic pytest to validate invoice_hash: pytest -q tests/test_deterministic_billing.py — expected: PASS with assertion that server invoice_hash equals locally computed sha256 canonical JSON. (Deterministic/preview tests described in test harness)
+If failure: inspect the stored procedure output JSON and compare line_items canonicalization rules (rounding/decimals). Fix rounding/Decimal handling in run_billing.py and re‑seed fixture.
+Run CI (full)10) Push branch or trigger GitHub Actions workflow: the CI job (.github/workflows/ci.yml) will run DDL deployment, registration, smoke harness and pytest. Expected: CI job completes green and artifacts attached (logs, test outputs). (CI workflow skeleton delivered)
+If failure in CI: open the run log to see whether failure was in provisioning, registration (missing snowsql), or tests — follow the remediation notes above for the failing stage. Use infra/register_via_connector.py as fallback if the runner lacks snowsql.
+Quick remediation checklist for common failures (one-liners)
+
+Missing storage integration / S3 access: manually run COPY INTO from S3 to validate and coordinate with infra to enable SNS/SQS notifications.  
+Procedure registration errors: ensure files are PUT to @~ before CREATE PROCEDURE and check PROCEDURE error logs for import exceptions.  
+External Function network errors: curl https:///similarity from a public host to confirm gateway health and check API_INTEGRATION IAM role trust/permissions.  
+Invoice_hash mismatch: ensure canonical JSON serialization and Decimal rounding parity between Snowpark and test harness; update run_billing rounding logic and re-run deterministic test.
+
+Expected &quot;green&quot; outcomes (what to confirm before marking CI green)
+
+SHOW TABLES shows core tables in AI_FEATURE_HUB and DESCRIBE shows expected columns.  
+SHOW PROCEDURES lists RUN_BILLING_RUN, EMBEDDING_INGEST_SP, ENTITLEMENT_CHECK, WRITE_EVIDENCE_BUNDLE.  
+SHOW INTEGRATIONS lists API integration and SHOW EXTERNAL FUNCTIONS lists your similarity/agent functions.  
+The smoke harness exits 0 and deterministic pytest passes asserting invoice_hash equality.  
+CI workflow completes with green status and attached logs/artefacts.
+
+Deliverables / repo files to inspect (quick map)
+
+DDL: sql/coreschema.sql and sql/vectorstore/schema.sql.  
+Provisioning &amp; registration helpers: infra/snowflake_provisioning.py and infra/register_via_connector.py.  
+Stored-procs: src/run_billing.py, src/embedding_ingest_sp.py, src/ingest_usage_sp.py, src/entitlement_check.py, src/write_evidence_bundle.py.  
+External Functions + FAISS: sql/external_functions_register.sql, faiss/production_faiss_builder_v2.py, faiss/Dockerfile.  
+Tests &amp; smoke harness: tests/test_deterministic_billing.py and tests/smoke/full_acceptance_smoke.sh.
+
+Would you like me to (choose one):
+
+(A) produce a single runnable shell script that executes the ordered commands above (preflight validations → provision → deploy DDL → PUT → CREATE PROCEDURE → external functions → smoke → pytest → CI trigger), or - (B) emit a checklist as a single downloadable plain‑text file you can attach to the Jira Epic for developer onboarding?
+
+******************************************************************************************************************************************
+Direct answer — I produced both (A) a single, runnable shell script (deploy/run_to_green.sh) that executes the ordered “preflight → provision → DDL → PUT → register → external functions → FAISS build → policies → smoke → tests → trigger CI” sequence, and (B) a concise plain‑text “remediation / run‑to‑green” checklist you can attach to a Jira Epic. Both include exact commands, expected outputs, and short remediation notes. Run the script from a machine (or CI job) with network access to Snowflake, Docker (for FAISS), and S3 (or your object store). All repo file paths referenced by the script exist in the delivered artifacts.
+What I include
+
+A ready-to-run shell script (text below) you can copy to deploy/run_to_green.sh, make executable, and run; it uses snowsql where available and falls back to the provided Python registrar if snowsql is not present.  
+A downloadable plain‑text remediation checklist (text below) suitable to paste into Jira, runbooks, or a README.
+
+Important: before running — set these environment variables (examples)
+
+SNOW_ACCOUNT, SNOW_USER, SNOW_PASSWORD, SNOW_ROLE, SNOW_WAREHOUSE, SNOW_DATABASE=AI_PLATFORM, SNOW_SCHEMA=AI_FEATURE_HUB — required for snowsql calls and registration.  
+STORAGE_INTEGRATION, S3_BUCKET (or cloud equivalent), API_AWS_ROLE_ARN, API_GATEWAY_HOST, DOCKER_REGISTRY (for FAISS container).
+
+A — The runnable shell script (deploy/run_to_green.sh)Save this exact text as deploy/run_to_green.sh, then run chmod +x deploy/run_to_green.sh and ./deploy/run_to_green.sh. The script is idempotent and prints expected outputs and remediation hints on failure. (The script assumes snowsql is installed; if not, it runs the Python connector fallback.)
+#!/usr/bin/env bashset -euo pipefail: &quot;${SNOW_ACCOUNT:?Need SNOW_ACCOUNT env var}&quot;: &quot;${SNOW_USER:?Need SNOW_USER env var}&quot;: &quot;${SNOW_ROLE:?Need SNOW_ROLE env var}&quot;: &quot;${SNOW_WAREHOUSE:?Need SNOW_WAREHOUSE env var}&quot;: &quot;${SNOW_DATABASE:=AI_PLATFORM}&quot;: &quot;${SNOW_SCHEMA:=AI_FEATURE_HUB}&quot;
+echo &quot;Run-to-green start: DB=${SNOW_DATABASE} SCHEMA=${SNOW_SCHEMA}&quot;
+Helper to run snowsql with defaults
+ssql() {  snowsql -a &quot;$SNOW_ACCOUNT&quot; -u &quot;$SNOW_USER&quot; -r &quot;$SNOW_ROLE&quot; -w &quot;$SNOW_WAREHOUSE&quot; -d &quot;$SNOW_DATABASE&quot; -s &quot;$SNOW_SCHEMA&quot; -q &quot;$1&quot;}
+0) Preflight: verify snowsql connectivity
+echo &quot;1) Preflight: verify snowsql connectivity...&quot;if command -v snowsql &gt;/dev/null 2&gt;&1; then  ssql &quot;SELECT current_version();&quot; || { echo &quot;ERROR: snowsql test failed. Check SNOW_* creds.&quot;; exit 2; }  echo &quot;snowsql reachable and credentials OK.&quot;else  echo &quot;snowsql not found on PATH — the script will attempt connector fallback for proc registration later.&quot;fi
+(Preflight pattern and env list referenced in repo runbooks)
+1) Provision Stage / File Format / Pipe (snowpipe)
+echo &quot;2) Provision stage, file format, and pipe...&quot;if [ -f &quot;sql/snowpipe_setup.sql&quot; ]; then  if command -v snowsql &gt;/dev/null 2&gt;&1; then    snowsql -a &quot;$SNOW_ACCOUNT&quot; -u &quot;$SNOW_USER&quot; -r &quot;$SNOW_ROLE&quot; -w &quot;$SNOW_WAREHOUSE&quot; -d &quot;$SNOW_DATABASE&quot; -s &quot;$SNOW_SCHEMA&quot; -f sql/snowpipe_setup.sql    echo &quot;Snowpipe/file format/stage SQL applied.&quot;  else    echo &quot;snowsql unavailable; please run sql/snowpipe_setup.sql manually or provision via infra/snowflake_provisioning.py&quot;  fielse  echo &quot;ERROR: sql/snowpipe_setup.sql not found in repo; abort&quot;; exit 3fi
+(Snowpipe setup provided in repo)
+2) Deploy core DDL
+echo &quot;3) Deploy core DDL...&quot;if [ -f &quot;sql/coreschema.sql&quot; ]; then  if command -v snowsql &gt;/dev/null 2&gt;&1; then    snowsql -a &quot;$SNOW_ACCOUNT&quot; -u &quot;$SNOW_USER&quot; -r &quot;$SNOW_ROLE&quot; -w &quot;$SNOW_WAREHOUSE&quot; -d &quot;$SNOW_DATABASE&quot; -s &quot;$SNOW_SCHEMA&quot; -f sql/coreschema.sql    echo &quot;Core DDL applied.&quot;  else    echo &quot;snowsql missing: please run sql/coreschema.sql manually in your environment.&quot;  fielse  echo &quot;ERROR: sql/coreschema.sql not found; abort&quot;; exit 4fi
+(Core DDL file paths exist in manifest)
+3) PUT Python files to @~ (stage)
+echo &quot;4) PUT Snowpark Python files to user stage @~ ...&quot;PUT_FILES=( &quot;src/run_billing.py&quot; &quot;src/embedding_ingest_sp.py&quot; &quot;src/ingest_usage_sp.py&quot; &quot;src/entitlement_check.py&quot; &quot;src/write_evidence_bundle.py&quot; )for f in &quot;${PUT_FILES[@]}&quot;; do  if [ -f &quot;$f&quot; ]; then    if command -v snowsql &gt;/dev/null 2&gt;&1; then      echo &quot;PUT $f -&gt; @&quot;      snowsql -a &quot;$SNOW_ACCOUNT&quot; -u &quot;$SNOW_USER&quot; -r &quot;$SNOW_ROLE&quot; -w &quot;$SNOW_WAREHOUSE&quot; -d &quot;$SNOW_DATABASE&quot; -s &quot;$SNOW_SCHEMA&quot; -q &quot;PUT file://$f @ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;&quot;    else      echo &quot;snowsql not available — skip PUT step; ensure you stage files via infra/register_via_connector.py or upload them manually&quot;    fi  else    echo &quot;WARN: $f missing; check repo. (Expected in src/ directory)&quot;  fidone
+(PUT pattern in repo runbooks)
+4) Register stored procedures (CREATE PROCEDURE)
+echo &quot;5) Register Snowpark stored-procedures (CREATE PROCEDURE)...&quot;if command -v snowsql &gt;/dev/null 2&gt;&1; then  if [ -f &quot;register/create_procedures_register.sql&quot; ]; then    snowsql -a &quot;$SNOW_ACCOUNT&quot; -u &quot;$SNOW_USER&quot; -r &quot;$SNOW_ROLE&quot; -w &quot;$SNOW_WAREHOUSE&quot; -d &quot;$SNOW_DATABASE&quot; -s &quot;$SNOW_SCHEMA&quot; -f register/create_procedures_register.sql    echo &quot;CREATE PROCEDURE executed.&quot;  else    echo &quot;ERROR: register/create_procedures_register.sql not found; abort&quot;; exit 5  fielse  echo &quot;snowsql missing — invoking Python fallback registrar...&quot;  if [ -f &quot;infra/register_via_connector.py&quot; ]; then    python3 infra/register_via_connector.py    echo &quot;Connector-based registration attempted.&quot;  else    echo &quot;ERROR: infra/register_via_connector.py not found; cannot register procedures automatically.&quot;; exit 6  fifi
+(Registration scripts and fallback provided)
+5) Create API_INTEGRATION and External Functions
+echo &quot;6) Register API_INTEGRATION / External Functions...&quot;if [ -f &quot;sql/external_functions_register.sql&quot; ]; then  if command -v snowsql &gt;/dev/null 2&gt;&1; then    snowsql -a &quot;$SNOW_ACCOUNT&quot; -u &quot;$SNOW_USER&quot; -r &quot;$SNOW_ROLE&quot; -w &quot;$SNOW_WAREHOUSE&quot; -d &quot;$SNOW_DATABASE&quot; -s &quot;$SNOW_SCHEMA&quot; -f sql/external_functions_register.sql    echo &quot;External functions registered (or updated).&quot;  else    echo &quot;Please run sql/external_functions_register.sql manually (snowsql required) or use infra/snowflake_provisioning.py&quot;  fielse  echo &quot;ERROR: sql/external_functions_register.sql missing; check repo&quot;; exit 7fi
+(External functions registration file in repo)
+6) FAISS index builder and container (PoC)
+echo &quot;7) FAISS index build &amp; container push (PoC) ...&quot;if [ -f &quot;faiss/production_faiss_builder_v2.py&quot; ]; then  if [ -z &quot;${S3_BUCKET:-}&quot; ]; then    echo &quot;SKIP: S3_BUCKET not set — developer must run the FAISS builder locally with S3_BUCKET env var&quot;  else    python3 faiss/production_faiss_builder_v2.py --snow_account &quot;$SNOW_ACCOUNT&quot; --snow_user &quot;$SNOW_USER&quot; --snow_password &quot;$SNOW_PASSWORD&quot; --warehouse &quot;$SNOW_WAREHOUSE&quot; --index_out /tmp/index.faiss --s3_bucket &quot;$S3_BUCKET&quot; --s3_key &quot;faiss/index.faiss&quot;    echo &quot;FAISS index built and uploaded to S3 path s3://$S3_BUCKET/faiss/index.faiss&quot;  fielse  echo &quot;WARN: faiss/production_faiss_builder_v2.py missing&quot;fi
+(FAISS builder in repo)
+7) Attach masking &amp; row-access policies and GRANTs
+echo &quot;8) Apply masking policies and grants...&quot;if [ -f &quot;sql/attach_policies_and_grants.sql&quot; ]; then  if command -v snowsql &gt;/dev/null 2&gt;&1; then    snowsql -a &quot;$SNOW_ACCOUNT&quot; -u &quot;$SNOW_USER&quot; -r &quot;$SNOW_ROLE&quot; -w &quot;$SNOW_WAREHOUSE&quot; -d &quot;$SNOW_DATABASE&quot; -s &quot;$SNOW_SCHEMA&quot; -f sql/attach_policies_and_grants.sql    echo &quot;Policies and grants applied.&quot;  else    echo &quot;snowsql missing — apply sql/attach_policies_and_grants.sql manually.&quot;  fielse  echo &quot;WARN: sql/attach_policies_and_grants.sql not present in repo; skip.&quot;fi
+(Masking/row-policy guidance present in repo)
+8) Smoke harness
+echo &quot;9) Run smoke harness...&quot;if [ -f &quot;tests/smoke/full_acceptance_smoke.sh&quot; ]; then  chmod +x tests/smoke/full_acceptance_smoke.sh  ./tests/smoke/full_acceptance_smoke.sh || { echo &quot;Smoke harness failed — inspect logs and fix upstream issues&quot;; exit 10; }  echo &quot;Smoke harness completed OK.&quot;else  echo &quot;WARN: tests/smoke/full_acceptance_smoke.sh not found&quot;fi
+(Smoke harness referenced in repo)
+9) Deterministic pytest
+echo &quot;10) Run deterministic billing pytest...&quot;if [ -f &quot;tests/test_deterministic_billing.py&quot; ]; then  if command -v pytest &gt;/dev/null 2&gt;&1; then    pytest -q tests/test_deterministic_billing.py || { echo &quot;Deterministic test failed — fix run_billing.py rounding/data canonicalization.&quot;; exit 11; }    echo &quot;Deterministic tests passed.&quot;  else    echo &quot;pytest not installed; install with pip install pytest and rerun.&quot;  fielse  echo &quot;WARN: tests/test_deterministic_billing.py missing&quot;fi
+(Deterministic test harness exists in repo)
+10) Trigger CI (optional)
+echo &quot;11) Optionally trigger GitHub Actions by pushing a test commit (or dispatch).&quot;echo &quot;To trigger: git add . &amp;&amp; git commit -m &#39;ci: run to green&#39; &amp;&amp; git push origin HEAD&quot;echo &quot;Or trigger the GitHub Actions workflow via repository_dispatch or manual dispatch in UI.&quot;
+(CI workflow provided in .github/workflows/ci.yml)
+echo &quot;Run-to-green script complete. If all steps passed, CI should be green and deterministic invoice_hash tests should pass.&quot;exit 0
+B — Single plain‑text remediation / run‑to‑green checklist (attachable)Save the block below as run_to_green_checklist.txt and attach to the Jira Epic. It duplicates the script steps in human‑readable checklist form with expected outputs and quick remediation tips.
+Run‑to‑Green Checklist — Snowflake Document‑Generation MVP (staging)Preflight — set environment variables (required)
+
+Set SNOW_ACCOUNT, SNOW_USER, SNOW_PASSWORD, SNOW_ROLE, SNOW_WAREHOUSE, SNOW_DATABASE=AI_PLATFORM, SNOW_SCHEMA=AI_FEATURE_HUB.  
+Set STORAGE_INTEGRATION, S3_BUCKET, API_AWS_ROLE_ARN, API_GATEWAY_HOST, DOCKER_REGISTRY as available.Quick connectivity checks
+Command: snowsql -a $SNOW_ACCOUNT -u $SNOW_USER -r $SNOW_ROLE -w $SNOW_WAREHOUSE -q &quot;SELECT current_version();&quot;Expected: a Snowflake version row; remediation: check credentials and network.Provision Snowpipe / Stage / File Format
+Command: snowsql -f sql/snowpipe_setup.sqlExpected: CREATE FILE FORMAT, CREATE STAGE, CREATE PIPE succeed; SHOW STAGES lists the stage; remediation: ensure STORAGE_INTEGRATION &amp; S3 notifications configured.Deploy core DDL
+Command: snowsql -f sql/coreschema.sql -d AI_PLATFORM -s AI_FEATURE_HUBExpected: tables created; test by inserting a sample row and selecting it back; remediation: check role privileges.Stage Snowpark Python files (@~)
+Commands (example): snowsql &quot;... PUT file://src/run_billing.py @~ AUTO_COMPRESS=FALSE;&quot; (repeat for each file)Expected: uploaded file list; verify with snowsql &quot;ls @~&quot;; remediation: ensure snowsql is present and files exist locally.Register stored procedures
+Command: snowsql -f register/create_procedures_register.sql OR python infra/register_via_connector.py if snowsql not availableExpected: CREATE PROCEDURE success and SHOW PROCEDURES lists procs; remediation: verify files are staged @~ and UPDATE IMPORTS paths.Register External Functions / API_INTEGRATION
+Command: snowsql -f sql/external_functions_register.sql (replace placeholders)Expected: API_INTEGRATION exists; SHOW EXTERNAL FUNCTIONS lists your similarity function; remediation: verify API_AWS_ROLE_ARN trust policy and gateway host.FAISS index build &amp; container (PoC)
+Command: python3 faiss/production_faiss_builder_v2.py --s3_bucket $S3_BUCKET --s3_key faiss/index.faiss ...Expected: /tmp/index.faiss produced, uploaded to s3://$S3_BUCKET/faiss/index.faiss; remediation: use IVF/OPQ for large corpora or increase memory.Apply masking &amp; grants
+Command: snowsql -f sql/attach_policies_and_grants.sqlExpected: masking policy applied; run SELECT as tenant role shows masked values and admin sees full values; remediation: ensure role names match your environment.Smoke harness (end‑to‑end)
+Command: chmod +x tests/smoke/full_acceptance_smoke.sh &amp;&amp; ./tests/smoke/full_acceptance_smoke.shExpected: script exits 0; remediation: inspect output logs for failing step (ingest, proc call, or verify).Deterministic billing unit test
+Command: pytest -q tests/test_deterministic_billing.pyExpected: PASS; asserts invoice_hash equality; remediation: align canonical JSON serialization and Decimal rounding in run_billing SP.CI run
+Action: push commit to trigger .github/workflows/ci.yml or run manual dispatch.Expected: CI completes registration + smoke + tests and returns green; remediation: check job logs for step failing (snowsql availability vs connector fallback).
+
+Quick remediation hints (common failures)
+
+snowsql connectivity: verify SNOW_* creds and network; test with simple SELECT current_version();  
+Missing staged files: run snowsql PUT manually or use infra/register_via_connector.py; check @~ listing; remediation: re-run PUT.  
+Invoice_hash mismatch: check numeric rounding and use Decimal quantize in run_billing.py; re-run deterministic test.  
+External Function network errors: curl the gateway host to validate endpoint; if 403/403-like: check role ARN and gateway integration permission.
+
+References (for the developer to inspect)
+
+Core DDL / table seeds: sql/coreschema.sql and sql/vectorstore/schema.sql.  
+Snowpipe, stage and pipe setup: sql/snowpipe_setup.sql and infra/snowflake_provisioning.py.  
+PUT/registration scripts: register/register_all_procs.sh and infra/register_via_connector.py.  
+Snowpark procedures: src/run_billing.py, src/embedding_ingest_sp.py, src/ingest_usage_sp.py, src/entitlement_check.py, src/write_evidence_bundle.py.  
+External Functions registration: sql/external_functions_register.sql.  
+FAISS builder &amp; Dockerfile: faiss/production_faiss_builder_v2.py and faiss/Dockerfile.  
+Tests and smoke harness: tests/test_deterministic_billing.py and tests/smoke/full_acceptance_smoke.sh.
+
+Next steps I can take immediately
+
+Emit the script as a downloadable artifact (ZIP or base64) for CI consumption.  
+Create a one‑click GitHub Actions job snippet to run this script on a self‑hosted runner.Tell me which of those you want me to emit next and I’ll produce it immediately.
+
+
+
